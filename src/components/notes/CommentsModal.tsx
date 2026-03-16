@@ -12,16 +12,18 @@ interface CommentsModalProps {
   onClose: () => void;
 }
 
+interface CommentProfile {
+  full_name: string | null;
+  avatar_url: string | null;
+  username: string | null;
+}
+
 interface Comment {
   id: string;
   content: string;
   created_at: string;
   user_id: string;
-  profiles: {
-    full_name: string | null;
-    avatar_url: string | null;
-    username: string | null;
-  } | null;
+  profiles: CommentProfile | null;
 }
 
 export default function CommentsModal({ noteId, noteTitle, onClose }: CommentsModalProps) {
@@ -49,10 +51,16 @@ export default function CommentsModal({ noteId, noteTitle, onClose }: CommentsMo
   const fetchComments = async () => {
     const { data } = await supabase
       .from("comments")
-      .select("*, profiles(full_name, avatar_url, username)")
+      .select(`
+        id, content, created_at, user_id,
+        profiles:user_id(full_name, avatar_url, username)
+      `)
       .eq("note_id", noteId)
       .order("created_at", { ascending: true });
-    if (data) setComments(data as Comment[]);
+    if (data) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      setComments(data as unknown as Comment[]);
+    }
   };
 
   const submitComment = async (e: React.FormEvent) => {
