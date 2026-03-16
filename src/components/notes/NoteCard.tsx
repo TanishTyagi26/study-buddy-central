@@ -1,167 +1,249 @@
-import { Star, Download, Heart, MessageCircle, Bookmark, BookmarkCheck, FileText, Presentation, File, Image } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { useState, useEffect } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/contexts/AuthContext";
+import { Heart, MessageCircle, Bookmark, Star, Download, Trash2, MoreVertical, FileText, ImageIcon, FileIcon, Video, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useState } from "react";
+import { Badge } from "@/components/ui/badge";
+import { useToast } from "@/hooks/use-toast";
+import { formatDistanceToNow } from "date-fns";
+import { Link } from "react-router-dom";
+import CommentsModal from "./CommentsModal";
 
-const fileTypeConfig: Record<string, { icon: typeof FileText; color: string; bg: string; label: string }> = {
-  pdf: { icon: FileText, color: "text-red-500", bg: "bg-red-50", label: "PDF" },
-  pptx: { icon: Presentation, color: "text-orange-500", bg: "bg-orange-50", label: "PPT" },
-  docx: { icon: File, color: "text-blue-500", bg: "bg-blue-50", label: "DOC" },
-  image: { icon: Image, color: "text-green-500", bg: "bg-green-50", label: "IMG" },
-};
-
-interface Note {
+export interface NoteWithProfile {
   id: string;
   title: string;
-  subject: string;
-  author: { name: string; avatar: string; color: string };
-  type: string;
-  size: string;
-  pages: number;
-  rating: number;
-  ratingCount: number;
-  downloads: number;
-  likes: number;
-  comments: number;
-  isBookmarked: boolean;
-  isTrending: boolean;
-  uploadedAt: string;
-  tags: string[];
-  preview: string;
+  description: string | null;
+  subject: string | null;
+  file_url: string;
+  file_type: string;
+  file_name: string;
+  file_size: number | null;
+  download_count: number | null;
+  created_at: string;
+  user_id: string;
+  profiles: {
+    full_name: string | null;
+    avatar_url: string | null;
+    username: string | null;
+    role: string;
+  } | null;
 }
 
 interface NoteCardProps {
-  note: Note;
+  note: NoteWithProfile;
+  onDelete?: () => void;
   compact?: boolean;
 }
 
-export default function NoteCard({ note, compact = false }: NoteCardProps) {
-  const [bookmarked, setBookmarked] = useState(note.isBookmarked);
+const getFileIcon = (type: string) => {
+  if (type.includes("pdf")) return FileText;
+  if (type.includes("image")) return ImageIcon;
+  if (type.includes("video")) return Video;
+  return FileIcon;
+};
+
+const getFileBadgeClass = (type: string) => {
+  if (type.includes("pdf")) return "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400";
+  if (type.includes("image")) return "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400";
+  if (type.includes("video")) return "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400";
+  return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400";
+};
+
+export default function NoteCard({ note, onDelete, compact = false }: NoteCardProps) {
+  const { user } = useAuth();
+  const { toast } = useToast();
   const [liked, setLiked] = useState(false);
-  const [likeCount, setLikeCount] = useState(note.likes);
+  const [likeCount, setLikeCount] = useState(0);
+  const [bookmarked, setBookmarked] = useState(false);
+  const [avgRating, setAvgRating] = useState(0);
+  const [userRating, setUserRating] = useState(0);
+  const [commentCount, setCommentCount] = useState(0);
+  const [showComments, setShowComments] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
-  const fileType = fileTypeConfig[note.type] || fileTypeConfig.pdf;
-  const FileIcon = fileType.icon;
+  useEffect(() => { fetchInteractions(); }, [note.id, user?.id]);
 
-  const handleLike = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setLiked(!liked);
-    setLikeCount(liked ? likeCount - 1 : likeCount + 1);
+  const fetchInteractions = async () => {
+    const [likesRes, bookmarkRes, ratingsRes, commentsRes, userLikeRes, userRatingRes] = await Promise.all([
+      supabase.from("likes").select("id", { count: "exact" }).eq("note_id", note.id),
+      user ? supabase.from("bookmarks").select("id").eq("note_id", note.id).eq("user_id", user.id).maybeSingle() : Promise.resolve({ data: null }),
+      supabase.from("ratings").select("rating").eq("note_id", note.id),
+      supabase.from("comments").select("id", { count: "exact" }).eq("note_id", note.id),
+      user ? supabase.from("likes").select("id").eq("note_id", note.id).eq("user_id", user.id).maybeSingle() : Promise.resolve({ data: null }),
+      user ? supabase.from("ratings").select("rating").eq("note_id", note.id).eq("user_id", user.id).maybeSingle() : Promise.resolve({ data: null }),
+    ]);
+    setLikeCount(likesRes.count || 0);
+    setBookmarked(!!bookmarkRes.data);
+    setLiked(!!userLikeRes.data);
+    const ratings = ratingsRes.data || [];
+    if (ratings.length) setAvgRating(ratings.reduce((a, b) => a + b.rating, 0) / ratings.length);
+    setCommentCount(commentsRes.count || 0);
+    if (userRatingRes.data) setUserRating((userRatingRes.data as { rating: number }).rating);
   };
 
-  const handleBookmark = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setBookmarked(!bookmarked);
+  const toggleLike = async () => {
+    if (!user) return;
+    if (liked) {
+      await supabase.from("likes").delete().eq("note_id", note.id).eq("user_id", user.id);
+      setLiked(false); setLikeCount(c => c - 1);
+    } else {
+      await supabase.from("likes").insert({ note_id: note.id, user_id: user.id });
+      setLiked(true); setLikeCount(c => c + 1);
+    }
   };
+
+  const toggleBookmark = async () => {
+    if (!user) return;
+    if (bookmarked) {
+      await supabase.from("bookmarks").delete().eq("note_id", note.id).eq("user_id", user.id);
+      setBookmarked(false);
+      toast({ title: "Removed from saved" });
+    } else {
+      await supabase.from("bookmarks").insert({ note_id: note.id, user_id: user.id });
+      setBookmarked(true);
+      toast({ title: "Saved!", description: "Added to your bookmarks." });
+    }
+  };
+
+  const submitRating = async (val: number) => {
+    if (!user) return;
+    await supabase.from("ratings").upsert({ note_id: note.id, user_id: user.id, rating: val });
+    setUserRating(val);
+    fetchInteractions();
+  };
+
+  const handleDownload = async () => {
+    await supabase.from("notes").update({ download_count: (note.download_count || 0) + 1 }).eq("id", note.id);
+    window.open(note.file_url, "_blank");
+  };
+
+  const handleDelete = async () => {
+    if (!user || user.id !== note.user_id) return;
+    setDeleting(true);
+    const { error } = await supabase.from("notes").delete().eq("id", note.id);
+    if (error) { toast({ title: "Error", description: error.message, variant: "destructive" }); }
+    else { toast({ title: "Note deleted" }); onDelete?.(); }
+    setDeleting(false);
+  };
+
+  const authorName = note.profiles?.full_name || note.profiles?.username || "Anonymous";
+  const authorInitials = authorName.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2);
+  const timeAgo = formatDistanceToNow(new Date(note.created_at), { addSuffix: true });
+  const fileExt = note.file_name?.split(".").pop()?.toUpperCase() || "FILE";
+  const FileTypeIcon = getFileIcon(note.file_type);
+
+  if (compact) {
+    return (
+      <div className="bg-card rounded-xl border border-border p-3 flex items-center gap-3 hover:border-primary/30 transition-colors">
+        <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${getFileBadgeClass(note.file_type)}`}>
+          <FileTypeIcon className="w-4 h-4" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-medium text-foreground truncate">{note.title}</p>
+          <p className="text-xs text-muted-foreground">{authorName} · {timeAgo}</p>
+        </div>
+        <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
+          <Heart className={`w-3.5 h-3.5 ${liked ? "fill-red-500 text-red-500" : ""}`} />
+          {likeCount}
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="bg-card rounded-2xl border border-border shadow-sm hover:shadow-card transition-all duration-200 hover:-translate-y-0.5 group cursor-pointer animate-fade-in">
-      <div className="p-4">
+    <>
+      <div className="bg-card rounded-2xl border border-border p-4 hover:border-primary/30 transition-all duration-200 hover:shadow-md">
         {/* Header */}
-        <div className="flex items-start justify-between gap-3 mb-3">
+        <div className="flex items-start justify-between mb-3">
           <div className="flex items-center gap-2 flex-1 min-w-0">
-            <div className={`w-10 h-10 rounded-xl ${fileType.bg} flex items-center justify-center shrink-0`}>
-              <FileIcon className={`w-5 h-5 ${fileType.color}`} />
-            </div>
+            {note.profiles?.avatar_url ? (
+              <img src={note.profiles.avatar_url} alt={authorName} className="w-8 h-8 rounded-full object-cover shrink-0" />
+            ) : (
+              <div className="w-8 h-8 rounded-full gradient-primary flex items-center justify-center text-white text-xs font-bold shrink-0">
+                {authorInitials}
+              </div>
+            )}
             <div className="min-w-0">
-              <h3 className="font-semibold text-foreground text-sm leading-snug line-clamp-2 group-hover:text-primary transition-colors">
-                {note.title}
-              </h3>
-              <div className="flex items-center gap-1.5 mt-0.5">
-                <Badge variant="secondary" className="text-xs px-1.5 py-0 h-4">{note.subject}</Badge>
-                {note.isTrending && (
-                  <Badge className="text-xs px-1.5 py-0 h-4 bg-accent/10 text-accent-foreground border-accent/20">
-                    🔥 Trending
-                  </Badge>
-                )}
+              <Link to={`/profile/${note.user_id}`} className="text-sm font-medium text-foreground hover:text-primary truncate block">
+                {authorName}
+              </Link>
+              <div className="flex items-center gap-1">
+                <p className="text-xs text-muted-foreground">{timeAgo}</p>
+                <Badge variant="secondary" className="text-xs px-1.5 py-0 h-4 capitalize">{note.profiles?.role || "student"}</Badge>
               </div>
             </div>
           </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="w-8 h-8 shrink-0"
-            onClick={handleBookmark}
-          >
-            {bookmarked
-              ? <BookmarkCheck className="w-4 h-4 text-primary" />
-              : <Bookmark className="w-4 h-4 text-muted-foreground" />
-            }
-          </Button>
+          {user?.id === note.user_id && (
+            <div className="relative">
+              <button onClick={() => setShowMenu(!showMenu)} className="text-muted-foreground hover:text-foreground p-1 rounded">
+                <MoreVertical className="w-4 h-4" />
+              </button>
+              {showMenu && (
+                <div className="absolute right-0 top-6 bg-popover border border-border rounded-xl shadow-lg z-10 min-w-32 overflow-hidden">
+                  <button
+                    onClick={() => { setShowMenu(false); handleDelete(); }}
+                    disabled={deleting}
+                    className="flex items-center gap-2 w-full px-3 py-2 text-sm text-destructive hover:bg-destructive/10 transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    {deleting ? "Deleting..." : "Delete"}
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
-        {/* Preview text */}
-        {!compact && (
-          <p className="text-muted-foreground text-xs line-clamp-2 mb-3 leading-relaxed">
-            {note.preview}
-          </p>
-        )}
+        {/* Content */}
+        <div className="mb-3">
+          <h3 className="font-semibold text-foreground mb-1 line-clamp-2">{note.title}</h3>
+          {note.description && <p className="text-sm text-muted-foreground line-clamp-2">{note.description}</p>}
+        </div>
 
         {/* Tags */}
-        {!compact && (
-          <div className="flex flex-wrap gap-1 mb-3">
-            {note.tags.slice(0, 3).map((tag) => (
-              <span key={tag} className="text-xs bg-primary-light text-primary px-2 py-0.5 rounded-full">
-                {tag}
-              </span>
-            ))}
-          </div>
-        )}
-
-        {/* Stats row */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            {/* Rating */}
-            <div className="flex items-center gap-1">
-              <Star className="w-3.5 h-3.5 text-accent fill-accent" />
-              <span className="text-xs font-semibold text-foreground">{note.rating}</span>
-              <span className="text-xs text-muted-foreground">({note.ratingCount})</span>
-            </div>
-            {/* Downloads */}
-            <div className="flex items-center gap-1 text-muted-foreground">
-              <Download className="w-3.5 h-3.5" />
-              <span className="text-xs">{note.downloads}</span>
-            </div>
-          </div>
-
-          {/* Actions */}
-          <div className="flex items-center gap-1">
-            <button
-              onClick={handleLike}
-              className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs transition-colors ${
-                liked ? "text-red-500 bg-red-50" : "text-muted-foreground hover:text-red-500 hover:bg-red-50"
-              }`}
-            >
-              <Heart className={`w-3.5 h-3.5 ${liked ? "fill-red-500" : ""}`} />
-              {likeCount}
-            </button>
-            <button className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs text-muted-foreground hover:text-primary hover:bg-primary-light transition-colors">
-              <MessageCircle className="w-3.5 h-3.5" />
-              {note.comments}
-            </button>
-          </div>
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-lg font-medium ${getFileBadgeClass(note.file_type)}`}>
+            <FileTypeIcon className="w-3 h-3" />
+            {fileExt}
+          </span>
+          {note.subject && <Badge variant="secondary" className="text-xs">{note.subject}</Badge>}
         </div>
 
-        {/* Footer */}
-        <div className="flex items-center justify-between mt-3 pt-3 border-t border-border">
-          <div className="flex items-center gap-2">
-            <div
-              className="w-6 h-6 rounded-full flex items-center justify-center text-white text-xs font-bold"
-              style={{ background: note.author.color }}
-            >
-              {note.author.avatar}
-            </div>
-            <span className="text-xs text-muted-foreground">{note.author.name}</span>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span>{fileType.label}</span>
-            <span>•</span>
-            <span>{note.size}</span>
-            <span>•</span>
-            <span>{note.uploadedAt}</span>
-          </div>
+        {/* Stars */}
+        <div className="flex items-center gap-0.5 mb-3">
+          {[1,2,3,4,5].map(star => (
+            <button key={star} onClick={() => submitRating(star)} className={`transition-transform hover:scale-110 ${star <= (userRating || avgRating) ? "text-amber-400" : "text-muted-foreground/30"}`}>
+              <Star className={`w-3.5 h-3.5 ${star <= (userRating || avgRating) ? "fill-current" : ""}`} />
+            </button>
+          ))}
+          {avgRating > 0 && <span className="text-xs text-muted-foreground ml-1">{avgRating.toFixed(1)}</span>}
+        </div>
+
+        {/* Actions */}
+        <div className="flex items-center gap-1 pt-2 border-t border-border">
+          <Button variant="ghost" size="sm" onClick={toggleLike} className={`gap-1.5 text-xs h-7 px-2 ${liked ? "text-red-500" : "text-muted-foreground"}`}>
+            <Heart className={`w-3.5 h-3.5 ${liked ? "fill-current" : ""}`} /> {likeCount}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => setShowComments(true)} className="gap-1.5 text-xs h-7 px-2 text-muted-foreground">
+            <MessageCircle className="w-3.5 h-3.5" /> {commentCount}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={toggleBookmark} className={`gap-1.5 text-xs h-7 px-2 ${bookmarked ? "text-primary" : "text-muted-foreground"}`}>
+            <Bookmark className={`w-3.5 h-3.5 ${bookmarked ? "fill-current" : ""}`} />
+          </Button>
+          <div className="flex-1" />
+          <Button variant="ghost" size="sm" onClick={handleDownload} className="gap-1.5 text-xs h-7 px-2 text-muted-foreground hover:text-primary">
+            <Download className="w-3.5 h-3.5" /> {note.download_count || 0}
+          </Button>
+          <a href={note.file_url} target="_blank" rel="noopener noreferrer">
+            <Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-muted-foreground hover:text-primary">
+              <ExternalLink className="w-3.5 h-3.5" />
+            </Button>
+          </a>
         </div>
       </div>
-    </div>
+
+      {showComments && <CommentsModal noteId={note.id} noteTitle={note.title} onClose={() => setShowComments(false)} />}
+    </>
   );
 }
