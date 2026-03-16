@@ -1,165 +1,297 @@
+import { useState, useEffect, useRef } from "react";
 import MainLayout from "@/components/layout/MainLayout";
-import { currentUser, notes } from "@/data/mockData";
-import { Star, Download, Upload, TrendingUp, Users, Edit, BookmarkCheck, Clock, Award, BarChart3 } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/contexts/AuthContext";
+import { useParams, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import NoteCard from "@/components/notes/NoteCard";
+import { useToast } from "@/hooks/use-toast";
+import { Edit2, Upload, Download, BookmarkCheck, Star, Camera, MessageCircle } from "lucide-react";
 
-const StatBadge = ({ icon: Icon, value, label, color }: { icon: typeof Star; value: string | number; label: string; color: string }) => (
-  <div className="bg-card rounded-2xl border border-border p-4 text-center">
-    <div className={`w-10 h-10 rounded-xl mx-auto flex items-center justify-center mb-2 ${color}`}>
-      <Icon className="w-5 h-5" />
-    </div>
-    <p className="text-2xl font-bold text-foreground">{value}</p>
-    <p className="text-xs text-muted-foreground mt-0.5">{label}</p>
-  </div>
-);
+interface Profile {
+  id: string;
+  username: string | null;
+  full_name: string | null;
+  avatar_url: string | null;
+  bio: string | null;
+  role: string;
+}
+
+interface NoteData {
+  id: string;
+  title: string;
+  description: string | null;
+  subject: string | null;
+  file_url: string;
+  file_type: string;
+  file_name: string;
+  file_size: number | null;
+  download_count: number | null;
+  created_at: string;
+  user_id: string;
+  profiles: { full_name: string | null; avatar_url: string | null; username: string | null; role: string } | null;
+}
 
 export default function ProfilePage() {
-  const bookmarkedNotes = notes.filter(n => n.isBookmarked);
-  const uploadedNotes = notes.slice(0, 3);
-  const downloadedNotes = notes.slice(1, 4);
+  const { user } = useAuth();
+  const { userId } = useParams();
+  const navigate = useNavigate();
+  const { toast } = useToast();
 
-  const engagementLevel =
-    currentUser.stats.engagement >= 80 ? "Expert" :
-    currentUser.stats.engagement >= 60 ? "Active" : "Learner";
+  const targetId = userId || user?.id;
+  const isOwn = !userId || userId === user?.id;
+
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [notes, setNotes] = useState<NoteData[]>([]);
+  const [editing, setEditing] = useState(false);
+  const [editForm, setEditForm] = useState({ full_name: "", bio: "", role: "student" });
+  const [saving, setSaving] = useState(false);
+  const [avatarUploading, setAvatarUploading] = useState(false);
+  const [stats, setStats] = useState({ uploads: 0, totalDownloads: 0 });
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (targetId) {
+      fetchProfile(targetId);
+      fetchNotes(targetId);
+    }
+  }, [targetId]);
+
+  const fetchProfile = async (id: string) => {
+    const { data } = await supabase.from("profiles").select("*").eq("id", id).single();
+    if (data) {
+      setProfile(data);
+      setEditForm({ full_name: data.full_name || "", bio: data.bio || "", role: data.role });
+    }
+  };
+
+  const fetchNotes = async (id: string) => {
+    const { data, count } = await supabase
+      .from("notes")
+      .select("*, profiles:user_id(full_name, avatar_url, username, role)", { count: "exact" })
+      .eq("user_id", id)
+      .order("created_at", { ascending: false });
+    if (data) {
+      setNotes(data as unknown as NoteData[]);
+      const totalDownloads = data.reduce((sum, n) => sum + (n.download_count || 0), 0);
+      setStats({ uploads: count || 0, totalDownloads });
+    }
+  };
+
+  const saveProfile = async () => {
+    if (!user) return;
+    setSaving(true);
+    const { error } = await supabase
+      .from("profiles")
+      .update({ full_name: editForm.full_name, bio: editForm.bio, role: editForm.role })
+      .eq("id", user.id);
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Profile updated!" });
+      fetchProfile(user.id);
+      setEditing(false);
+    }
+    setSaving(false);
+  };
+
+  const uploadAvatar = async (file: File) => {
+    if (!user) return;
+    setAvatarUploading(true);
+    try {
+      const ext = file.name.split(".").pop();
+      const path = `${user.id}/avatar.${ext}`;
+      await supabase.storage.from("avatars").remove([path]);
+      const { data, error } = await supabase.storage.from("avatars").upload(path, file, { upsert: true });
+      if (error) throw error;
+      const { data: { publicUrl } } = supabase.storage.from("avatars").getPublicUrl(data.path);
+      await supabase.from("profiles").update({ avatar_url: publicUrl }).eq("id", user.id);
+      fetchProfile(user.id);
+      toast({ title: "Profile picture updated!" });
+    } catch (err: unknown) {
+      toast({ title: "Error", description: err instanceof Error ? err.message : "Failed", variant: "destructive" });
+    } finally {
+      setAvatarUploading(false);
+    }
+  };
+
+  const avatarInitials = profile?.full_name?.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2) || "WN";
 
   return (
-    <MainLayout title="Profile" subtitle="Your personal stats and activity">
-      <div className="p-6 max-w-5xl mx-auto space-y-6">
-        {/* Profile header */}
+    <MainLayout title="Profile">
+      <div className="p-4 md:p-6 max-w-4xl mx-auto pb-20 md:pb-6 space-y-6">
+        {/* Profile card */}
         <div className="bg-card rounded-2xl border border-border overflow-hidden">
-          {/* Banner */}
           <div className="h-24 gradient-hero relative">
-            <div className="absolute inset-0 opacity-30">
-              <div className="absolute top-2 right-8 w-24 h-24 rounded-full bg-white/20 blur-2xl" />
+            <div className="absolute inset-0 opacity-20">
+              <div className="absolute top-2 right-8 w-32 h-32 rounded-full bg-white/20 blur-2xl" />
             </div>
           </div>
-          {/* Info */}
-          <div className="px-6 pb-6">
+          <div className="px-5 pb-5">
             <div className="flex items-end justify-between -mt-8 mb-4">
-              <div
-                className="w-16 h-16 rounded-2xl border-4 border-card flex items-center justify-center text-white text-xl font-bold shadow-lg"
-                style={{ background: currentUser.avatarColor }}
-              >
-                {currentUser.avatar}
+              <div className="relative group">
+                {profile?.avatar_url ? (
+                  <img
+                    src={profile.avatar_url}
+                    alt={profile.full_name || "User"}
+                    className="w-16 h-16 rounded-2xl border-4 border-card object-cover shadow-lg"
+                  />
+                ) : (
+                  <div className="w-16 h-16 rounded-2xl border-4 border-card gradient-primary flex items-center justify-center text-white text-xl font-bold shadow-lg">
+                    {avatarInitials}
+                  </div>
+                )}
+                {isOwn && (
+                  <>
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={avatarUploading}
+                      className="absolute inset-0 rounded-2xl bg-black/50 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity"
+                    >
+                      <Camera className="w-5 h-5 text-white" />
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={e => e.target.files?.[0] && uploadAvatar(e.target.files[0])}
+                    />
+                  </>
+                )}
               </div>
-              <Button variant="outline" size="sm" className="gap-2 border-primary/30 text-primary hover:bg-primary-light">
-                <Edit className="w-3.5 h-3.5" />
-                Edit Profile
-              </Button>
+              <div className="flex gap-2">
+                {!isOwn && (
+                  <Button size="sm" className="gradient-primary text-white gap-1.5" onClick={() => navigate(`/chat/${targetId}`)}>
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    Message
+                  </Button>
+                )}
+                {isOwn && !editing && (
+                  <Button variant="outline" size="sm" onClick={() => setEditing(true)} className="gap-1.5 border-primary/30 text-primary">
+                    <Edit2 className="w-3.5 h-3.5" />
+                    Edit Profile
+                  </Button>
+                )}
+              </div>
             </div>
-            <div className="flex items-start justify-between flex-wrap gap-4">
-              <div>
-                <h2 className="text-xl font-bold text-foreground">{currentUser.name}</h2>
-                <p className="text-muted-foreground text-sm">@{currentUser.username}</p>
-                <div className="flex items-center gap-2 mt-2 flex-wrap">
-                  <Badge variant="secondary">{currentUser.department}</Badge>
-                  <Badge variant="secondary">{currentUser.year}</Badge>
-                  <Badge variant="secondary">{currentUser.university}</Badge>
-                  <Badge className="bg-accent-light text-accent-foreground border-accent/20">
-                    <Award className="w-3 h-3 mr-1" />
-                    {engagementLevel}
-                  </Badge>
+
+            {editing ? (
+              <div className="space-y-3">
+                <div className="space-y-1">
+                  <Label>Full Name</Label>
+                  <Input
+                    value={editForm.full_name}
+                    onChange={e => setEditForm(f => ({ ...f, full_name: e.target.value }))}
+                    className="bg-secondary border-0 focus-visible:ring-1 focus-visible:ring-primary"
+                  />
                 </div>
-                <p className="text-sm text-muted-foreground mt-3 max-w-md">{currentUser.bio}</p>
+                <div className="space-y-1">
+                  <Label>Bio</Label>
+                  <Textarea
+                    value={editForm.bio}
+                    onChange={e => setEditForm(f => ({ ...f, bio: e.target.value }))}
+                    rows={2}
+                    className="bg-secondary border-0 focus-visible:ring-1 focus-visible:ring-primary resize-none"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label>Role</Label>
+                  <select
+                    value={editForm.role}
+                    onChange={e => setEditForm(f => ({ ...f, role: e.target.value }))}
+                    className="w-full h-10 px-3 rounded-xl bg-secondary text-foreground text-sm border-0 focus:outline-none focus:ring-1 focus:ring-primary"
+                  >
+                    <option value="student">Student</option>
+                    <option value="staff">Staff</option>
+                  </select>
+                </div>
+                <div className="flex gap-2">
+                  <Button onClick={saveProfile} disabled={saving} size="sm" className="gradient-primary text-white">
+                    {saving ? "Saving..." : "Save"}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => setEditing(false)}>Cancel</Button>
+                </div>
               </div>
-              <div className="flex items-center gap-4">
-                <div className="text-center">
-                  <p className="text-lg font-bold text-foreground">{currentUser.stats.followers}</p>
-                  <p className="text-xs text-muted-foreground">Followers</p>
+            ) : (
+              <>
+                <h2 className="text-xl font-bold text-foreground">{profile?.full_name || "Anonymous"}</h2>
+                <p className="text-muted-foreground text-sm">@{profile?.username || "user"}</p>
+                <div className="flex flex-wrap gap-2 mt-2">
+                  <Badge variant="secondary" className="capitalize">{profile?.role || "student"}</Badge>
                 </div>
-                <div className="w-px h-8 bg-border" />
-                <div className="text-center">
-                  <p className="text-lg font-bold text-foreground">{currentUser.stats.following}</p>
-                  <p className="text-xs text-muted-foreground">Following</p>
-                </div>
-              </div>
-            </div>
+                {profile?.bio && (
+                  <p className="text-sm text-muted-foreground mt-3 max-w-md">{profile.bio}</p>
+                )}
+              </>
+            )}
           </div>
         </div>
 
-        {/* Stats grid */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <StatBadge icon={Upload} value={currentUser.stats.uploads} label="Notes Uploaded" color="bg-primary-light text-primary" />
-          <StatBadge icon={Download} value={currentUser.stats.downloads} label="Total Downloads" color="bg-teal-light text-teal" />
-          <StatBadge icon={Star} value={currentUser.stats.ratingsReceived} label="Avg Rating" color="bg-accent-light text-accent" />
-          <StatBadge icon={TrendingUp} value={`${currentUser.stats.engagement}%`} label="Engagement" color="bg-success-light text-success" />
+        {/* Stats */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {[
+            { icon: Upload, value: stats.uploads, label: "Notes Uploaded", color: "bg-primary-light text-primary" },
+            { icon: Download, value: stats.totalDownloads, label: "Total Downloads", color: "bg-teal-light text-teal" },
+            { icon: Star, value: notes.length > 0 ? "★" : "–", label: "Rated Notes", color: "bg-accent-light text-accent" },
+            { icon: BookmarkCheck, value: notes.length, label: "Total Notes", color: "bg-success-light text-success" },
+          ].map(s => (
+            <div key={s.label} className="bg-card rounded-2xl border border-border p-4 text-center">
+              <div className={`w-9 h-9 rounded-xl mx-auto flex items-center justify-center mb-2 ${s.color}`}>
+                <s.icon className="w-4 h-4" />
+              </div>
+              <p className="text-xl font-bold text-foreground">{s.value}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">{s.label}</p>
+            </div>
+          ))}
         </div>
 
-        {/* Tabs */}
+        {/* Notes */}
         <Tabs defaultValue="uploads">
-          <TabsList className="bg-secondary rounded-xl p-1 w-full grid grid-cols-4">
-            <TabsTrigger value="uploads" className="rounded-lg text-xs sm:text-sm">
+          <TabsList className="bg-secondary rounded-xl p-1 w-full grid grid-cols-2">
+            <TabsTrigger value="uploads" className="rounded-lg">
               <Upload className="w-3.5 h-3.5 mr-1.5" />
-              Uploads
+              Uploads ({stats.uploads})
             </TabsTrigger>
-            <TabsTrigger value="downloads" className="rounded-lg text-xs sm:text-sm">
-              <Download className="w-3.5 h-3.5 mr-1.5" />
-              Downloads
-            </TabsTrigger>
-            <TabsTrigger value="bookmarks" className="rounded-lg text-xs sm:text-sm">
-              <BookmarkCheck className="w-3.5 h-3.5 mr-1.5" />
-              Saved
-            </TabsTrigger>
-            <TabsTrigger value="activity" className="rounded-lg text-xs sm:text-sm">
-              <BarChart3 className="w-3.5 h-3.5 mr-1.5" />
-              Activity
+            <TabsTrigger value="info" className="rounded-lg">
+              Info
             </TabsTrigger>
           </TabsList>
-
           <TabsContent value="uploads" className="mt-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {uploadedNotes.map(note => <NoteCard key={note.id} note={note} />)}
-            </div>
-          </TabsContent>
-
-          <TabsContent value="downloads" className="mt-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {downloadedNotes.map(note => <NoteCard key={note.id} note={note} />)}
-            </div>
-          </TabsContent>
-
-          <TabsContent value="bookmarks" className="mt-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {bookmarkedNotes.map(note => <NoteCard key={note.id} note={note} />)}
-            </div>
-            {bookmarkedNotes.length === 0 && (
+            {notes.length === 0 ? (
               <div className="text-center py-12 text-muted-foreground">
-                <BookmarkCheck className="w-12 h-12 mx-auto mb-3 opacity-20" />
-                <p>No bookmarked notes yet</p>
+                <Upload className="w-10 h-10 mx-auto mb-2 opacity-20" />
+                <p>No notes uploaded yet</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                {notes.map(note => (
+                  <NoteCard key={note.id} note={note} onDelete={() => fetchNotes(targetId!)} />
+                ))}
               </div>
             )}
           </TabsContent>
-
-          <TabsContent value="activity" className="mt-4">
-            <div className="bg-card rounded-2xl border border-border p-6">
-              <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
-                <BarChart3 className="w-4 h-4 text-primary" />
-                Activity Overview
-              </h3>
-              <div className="space-y-4">
-                {[
-                  { label: "Notes Uploaded This Month", value: 8, max: 20, color: "bg-primary" },
-                  { label: "Downloads Received", value: 68, max: 100, color: "bg-teal" },
-                  { label: "Comments Given", value: 24, max: 50, color: "bg-accent" },
-                  { label: "Engagement Score", value: currentUser.stats.engagement, max: 100, color: "bg-success" },
-                ].map(item => (
-                  <div key={item.label}>
-                    <div className="flex justify-between text-sm mb-1.5">
-                      <span className="text-foreground font-medium">{item.label}</span>
-                      <span className="text-muted-foreground">{item.value}/{item.max}</span>
-                    </div>
-                    <div className="h-2 bg-secondary rounded-full overflow-hidden">
-                      <div
-                        className={`h-full ${item.color} rounded-full transition-all duration-700`}
-                        style={{ width: `${(item.value / item.max) * 100}%` }}
-                      />
-                    </div>
-                  </div>
-                ))}
+          <TabsContent value="info" className="mt-4">
+            <div className="bg-card rounded-2xl border border-border p-5 space-y-3">
+              <div>
+                <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">Username</p>
+                <p className="text-foreground">@{profile?.username || "–"}</p>
               </div>
+              <div>
+                <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">Role</p>
+                <Badge variant="secondary" className="capitalize">{profile?.role || "student"}</Badge>
+              </div>
+              {profile?.bio && (
+                <div>
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">Bio</p>
+                  <p className="text-foreground text-sm">{profile.bio}</p>
+                </div>
+              )}
             </div>
           </TabsContent>
         </Tabs>
